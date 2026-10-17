@@ -123,4 +123,11 @@ return [
         'store' => env('APP_MAINTENANCE_STORE', 'database'),
     ],
 
+    'jwt_secret' => env('JWT_SECRET', ''),
+    'admin_username' => env('ADMIN_USERNAME', ''),
+    'admin_password' => env('ADMIN_PASSWORD', ''),
+    'covers_dir' => env('COVERS_DIR', storage_path('app/covers')),
+    'cors_origin' => env('CORS_ORIGIN', env('FRONTEND_URL', 'http://localhost:5173')),
+
 ];
+

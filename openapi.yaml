@@ -1,0 +1,834 @@
+openapi: 3.0.3
+info:
+  title: Manager Library API
+  version: 1.0.0
+  description: >
+    Contrato HTTP oficial para **Manager Library** (SENA ADSO 3413974).
+    Implementado sobre Laravel 11 y PostgreSQL 16 (esquema `library`) siguiendo Arquitectura Hexagonal.
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Servidor local / Docker Compose
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Token JWT HS256 con vigencia de 8 horas (`sub` y `role`).
+
+  schemas:
+    ErrorDetail:
+      type: object
+      required: [field, issue]
+      properties:
+        field:
+          type: string
+          example: items[0].book_id
+        issue:
+          type: string
+          example: sin ejemplares
+
+    ErrorResponse:
+      type: object
+      required: [code, message, details]
+      properties:
+        code:
+          type: string
+          enum:
+            - INVALID_CREDENTIALS
+            - FORBIDDEN_ROLE
+            - NOT_FOUND
+            - USERNAME_TAKEN
+            - ISBN_TAKEN
+            - DOCUMENT_TAKEN
+            - BOOK_HAS_OPEN_LOANS
+            - BOOK_NOT_AVAILABLE
+            - MEMBER_HAS_OVERDUE
+            - ITEM_ALREADY_RETURNED
+            - MEMBER_LIMIT_EXCEEDED
+            - DUPLICATE_BOOK_IN_LOAN
+            - VALIDATION_ERROR
+            - INVALID_DATE_RANGE
+            - INTERNAL_ERROR
+          example: BOOK_NOT_AVAILABLE
+        message:
+          type: string
+          example: No quedan ejemplares disponibles de «Cien años de soledad».
+        details:
+          type: array
+          items:
+            $ref: '#/components/schemas/ErrorDetail'
+
+    Category:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Novela
+
+    Book:
+      type: object
+      required: [id, title, author, isbn, category, total_copies, available_copies, cover_key]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          maxLength: 250
+        author:
+          type: string
+          maxLength: 200
+        isbn:
+          type: string
+          pattern: '^\d{13}$'
+        category:
+          $ref: '#/components/schemas/Category'
+        total_copies:
+          type: integer
+          minimum: 1
+        available_copies:
+          type: integer
+          minimum: 0
+        cover_key:
+          type: string
+          nullable: true
+          description: Clave opaca de portada o null si no tiene portada.
+
+    Member:
+      type: object
+      required: [id, full_name, document_number]
+      properties:
+        id:
+          type: string
+          format: uuid
+        full_name:
+          type: string
+          maxLength: 200
+        document_number:
+          type: string
+          maxLength: 30
+        active_loans:
+          type: integer
+          minimum: 0
+          description: Conteo de libros sin devolver (presente en GET /members/{id}).
+
+    LoanItem:
+      type: object
+      required: [id, book_id, book_title, isbn, category_name, due_at, returned_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        book_id:
+          type: string
+          format: uuid
+        book_title:
+          type: string
+        isbn:
+          type: string
+        category_name:
+          type: string
+        due_at:
+          type: string
+          format: date-time
+          example: '2026-10-28T14:15:00Z'
+        returned_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    Loan:
+      type: object
+      required: [id, member_id, loaned_at, status, items]
+      properties:
+        id:
+          type: string
+          format: uuid
+        member_id:
+          type: string
+          format: uuid
+        loaned_at:
+          type: string
+          format: date-time
+          example: '2026-10-14T14:15:00Z'
+        status:
+          type: string
+          enum: [open, overdue, closed]
+        items:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items:
+            $ref: '#/components/schemas/LoanItem'
+
+    OverdueItem:
+      type: object
+      required: [loan_id, item_id, book_title, member_name, due_at, days_late]
+      properties:
+        loan_id:
+          type: string
+          format: uuid
+        item_id:
+          type: string
+          format: uuid
+        book_title:
+          type: string
+        member_name:
+          type: string
+        due_at:
+          type: string
+          format: date-time
+        days_late:
+          type: integer
+          minimum: 1
+
+    MostBorrowedRow:
+      type: object
+      required: [book_id, book_title, category_name, times_borrowed]
+      properties:
+        book_id:
+          type: string
+          format: uuid
+        book_title:
+          type: string
+        category_name:
+          type: string
+        times_borrowed:
+          type: integer
+          minimum: 1
+
+paths:
+  /health:
+    get:
+      summary: Estado de salud del servicio
+      security: []
+      responses:
+        '200':
+          description: Servicio operativo
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /auth/login:
+    post:
+      summary: Iniciar sesión (HU-01)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Token JWT emitido con vigencia de 8 horas
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, token_type, expires_in, role]
+                properties:
+                  access_token:
+                    type: string
+                  token_type:
+                    type: string
+                    example: Bearer
+                  expires_in:
+                    type: integer
+                    example: 28800
+                  role:
+                    type: string
+                    enum: [admin, librarian]
+        '401':
+          description: Credenciales inválidas (`INVALID_CREDENTIALS`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Error de validación (`VALIDATION_ERROR`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /users:
+    post:
+      summary: Crear bibliotecario (HU-02, solo admin)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password, role]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                role:
+                  type: string
+                  enum: [librarian]
+      responses:
+        '201':
+          description: Bibliotecario creado (sin password ni password_hash)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, username, role]
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  username:
+                    type: string
+                  role:
+                    type: string
+                    example: librarian
+        '401':
+          description: No autenticado (`INVALID_CREDENTIALS`)
+        '403':
+          description: Rol insuficiente (`FORBIDDEN_ROLE`)
+        '409':
+          description: Nombre de usuario duplicado (`USERNAME_TAKEN`)
+        '422':
+          description: Rol inválido o datos incompletos (`VALIDATION_ERROR`)
+
+  /categories:
+    get:
+      summary: Listar las cinco categorías ordenadas por nombre
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Lista de categorías
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Category'
+
+  /books:
+    get:
+      summary: Buscar libros activos (HU-04)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: q
+          schema:
+            type: string
+        - in: query
+          name: category_id
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: size
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+      responses:
+        '200':
+          description: Página de libros activos
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, page, size, total]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Book'
+                  page:
+                    type: integer
+                  size:
+                    type: integer
+                  total:
+                    type: integer
+    post:
+      summary: Crear libro (HU-03, solo admin)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, author, isbn, category_id, total_copies]
+              properties:
+                title:
+                  type: string
+                author:
+                  type: string
+                isbn:
+                  type: string
+                category_id:
+                  type: string
+                  format: uuid
+                total_copies:
+                  type: integer
+                  minimum: 1
+      responses:
+        '201':
+          description: Libro creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '409':
+          description: ISBN activo duplicado (`ISBN_TAKEN`)
+        '422':
+          description: Datos inválidos (`VALIDATION_ERROR`)
+
+  /books/{id}:
+    get:
+      summary: Detalle de un libro activo (HU-04)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Detalle del libro
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '404':
+          description: Libro inexistente o dado de baja (`NOT_FOUND`)
+    put:
+      summary: Editar título, autor, categoría y total de ejemplares (HU-03, solo admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, author, category_id, total_copies]
+              properties:
+                title:
+                  type: string
+                author:
+                  type: string
+                category_id:
+                  type: string
+                  format: uuid
+                total_copies:
+                  type: integer
+                  minimum: 1
+      responses:
+        '200':
+          description: Libro actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '404':
+          description: No encontrado (`NOT_FOUND`)
+        '422':
+          description: Total dejaría disponibles en negativo (`VALIDATION_ERROR`)
+    delete:
+      summary: Baja lógica de un libro (HU-03, solo admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Libro dado de baja lógicamente
+        '404':
+          description: No encontrado (`NOT_FOUND`)
+        '409':
+          description: El libro tiene préstamos abiertos (`BOOK_HAS_OPEN_LOANS`)
+
+  /books/{id}/cover:
+    get:
+      summary: Obtener binario de portada
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Binario de imagen JPEG o PNG
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Libro o portada inexistente (`NOT_FOUND`)
+    put:
+      summary: Subir portada JPG/PNG máx. 2 MB (HU-03, solo admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Libro actualizado con `cover_key` opaca
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '422':
+          description: Archivo mayor a 2 MB o tipo distinto de JPG/PNG (`VALIDATION_ERROR`)
+    delete:
+      summary: Quitar portada (HU-03, solo admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Portada eliminada
+
+  /members:
+    get:
+      summary: Listar y buscar socios (HU-05)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: q
+          schema:
+            type: string
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: size
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+      responses:
+        '200':
+          description: Página de socios
+    post:
+      summary: Crear socio (HU-05)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [full_name, document_number]
+              properties:
+                full_name:
+                  type: string
+                document_number:
+                  type: string
+      responses:
+        '201':
+          description: Socio creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+        '409':
+          description: Documento duplicado (`DOCUMENT_TAKEN`)
+        '422':
+          description: Datos inválidos (`VALIDATION_ERROR`)
+
+  /members/{id}:
+    get:
+      summary: Detalle de socio con conteo de préstamos activos sin devolver (HU-05)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Socio con `active_loans`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+        '404':
+          description: Socio no encontrado (`NOT_FOUND`)
+
+  /loans:
+    post:
+      summary: Registrar un préstamo de 1 a 3 libros (HU-06)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [member_id, items]
+              properties:
+                member_id:
+                  type: string
+                  format: uuid
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 3
+                  items:
+                    type: object
+                    required: [book_id]
+                    properties:
+                      book_id:
+                        type: string
+                        format: uuid
+      responses:
+        '201':
+          description: Préstamo registrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+        '404':
+          description: Socio o libro inexistente (`NOT_FOUND`)
+        '409':
+          description: Sin ejemplares (`BOOK_NOT_AVAILABLE`) o socio con vencidos (`MEMBER_HAS_OVERDUE`)
+        '422':
+          description: Supera máximo de 3 libros sin devolver (`MEMBER_LIMIT_EXCEEDED`) o libro repetido (`DUPLICATE_BOOK_IN_LOAN`)
+    get:
+      summary: Listar préstamos filtrados por rango, estado calculado y socio (HU-08)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [open, overdue, closed]
+        - in: query
+          name: member_id
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: size
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+      responses:
+        '200':
+          description: Página de préstamos
+
+  /loans/overdue:
+    get:
+      summary: Listar líneas de préstamo vencidas ordenadas por más días de retraso primero (HU-09)
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Líneas vencidas
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OverdueItem'
+
+  /loans/{id}:
+    get:
+      summary: Detalle de un préstamo con sus líneas y estado calculado (HU-08)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Detalle del préstamo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Loan'
+        '404':
+          description: Préstamo no encontrado (`NOT_FOUND`)
+
+  /loans/{loan_id}/items/{item_id}/return:
+    post:
+      summary: Devolver una línea de préstamo (HU-07)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: loan_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: item_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Línea devuelta con `returned_at` lleno
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoanItem'
+        '404':
+          description: Préstamo o línea inexistente (`NOT_FOUND`)
+        '409':
+          description: Línea ya devuelta (`ITEM_ALREADY_RETURNED`)
+
+  /reports/most-borrowed:
+    get:
+      summary: Reporte de libros más prestados sobre valores congelados (HU-10, ADR-004, solo admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: from
+          required: true
+          schema:
+            type: string
+            format: date
+            example: '2026-10-01'
+        - in: query
+          name: to
+          required: true
+          schema:
+            type: string
+            format: date
+            example: '2026-10-31'
+      responses:
+        '200':
+          description: Filas agregadas por `book_id + book_title + category_name` congelados
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [from, to, rows]
+                properties:
+                  from:
+                    type: string
+                    format: date
+                  to:
+                    type: string
+                    format: date
+                  rows:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MostBorrowedRow'
+        '403':
+          description: Rol insuficiente (`FORBIDDEN_ROLE`)
+        '422':
+          description: Rango de fechas invertido (`INVALID_DATE_RANGE`) o fechas inválidas (`VALIDATION_ERROR`)

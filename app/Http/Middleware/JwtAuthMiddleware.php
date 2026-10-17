@@ -1,69 +1,55 @@
 <?php
 
+declare(strict_types=1);
+
 namespace App\Http\Middleware;
 
-use App\Http\Responses\ApiResponse;
-use App\Models\User;
-use App\Services\JwtService;
+use App\Application\Ports\Outbound\TokenIssuer;
+use App\Application\Ports\Outbound\UserRepository;
+use App\Domain\Exceptions\ForbiddenRoleException;
+use App\Domain\Exceptions\InvalidCredentialsException;
 use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 class JwtAuthMiddleware
 {
-    protected JwtService $jwtService;
-
-    public function __construct(JwtService $jwtService)
-    {
-        $this->jwtService = $jwtService;
+    public function __construct(
+        private readonly TokenIssuer $tokenIssuer,
+        private readonly UserRepository $users,
+    ) {
     }
 
-    public function handle(Request $request, Closure $next, ...$roles): Response
+    public function handle(Request $request, Closure $next, string ...$roles): Response
     {
         $header = $request->header('Authorization');
-        if (!$header || !str_starts_with($header, 'Bearer ')) {
-            return ApiResponse::error(
-                'INVALID_CREDENTIALS',
-                'Token de autenticación ausente o con formato incorrecto.',
-                [],
-                401
-            );
+        $token = null;
+
+        if (is_string($header) && str_starts_with($header, 'Bearer ')) {
+            $token = trim(substr($header, 7));
         }
 
-        $token = substr($header, 7);
-        $payload = $this->jwtService->validateToken($token);
-
-        if (!$payload || !isset($payload->sub)) {
-            return ApiResponse::error(
-                'INVALID_CREDENTIALS',
-                'Token inválido, expirado o manipulado.',
-                [],
-                401
-            );
+        if ($token === null || $token === '') {
+            throw new InvalidCredentialsException('Token de autenticación ausente o con formato incorrecto.');
         }
 
-        $user = User::find($payload->sub);
-        if (!$user) {
-            return ApiResponse::error(
-                'INVALID_CREDENTIALS',
-                'Usuario asociado al token no existe.',
-                [],
-                401
-            );
+        $claims = $this->tokenIssuer->validate($token);
+        if ($claims === null || ($claims['sub'] ?? '') === '') {
+            throw new InvalidCredentialsException('Token inválido, expirado o manipulado.');
         }
 
-        // Check roles if specified
-        if (!empty($roles) && !in_array($user->role, $roles, true)) {
-            return ApiResponse::error(
-                'FORBIDDEN_ROLE',
-                'No tiene permisos suficientes para ejecutar esta operación.',
-                [],
-                403
-            );
+        $user = $this->users->findById($claims['sub']);
+        if ($user === null) {
+            throw new InvalidCredentialsException('El usuario asociado al token no existe.');
         }
 
-        $request->setUserResolver(fn() => $user);
+        // Authorization evaluated by role before hitting the controller so 403 never leaks resource existence (api-contract.md §4)
+        if ($roles !== [] && !in_array($user->role(), $roles, true)) {
+            throw new ForbiddenRoleException();
+        }
+
         $request->attributes->set('auth_user', $user);
+        $request->attributes->set('auth_user_id', $user->id());
 
         return $next($request);
     }

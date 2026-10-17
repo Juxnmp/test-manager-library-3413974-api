@@ -1,62 +1,44 @@
 <?php
 
+declare(strict_types=1);
+
 namespace App\Http\Controllers;
 
-use App\Http\Responses\ApiResponse;
-use App\Models\User;
-use App\Services\JwtService;
+use App\Application\Services\LoginService;
+use App\Application\Services\ProvisionAdminService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Validator;
 
 class AuthController extends Controller
 {
-    protected JwtService $jwtService;
-
-    public function __construct(JwtService $jwtService)
-    {
-        $this->jwtService = $jwtService;
+    public function __construct(
+        private readonly LoginService $loginService,
+        private readonly ProvisionAdminService $provisionAdminService,
+    ) {
     }
 
     /**
-     * POST /api/v1/auth/login
+     * POST /api/v1/auth/login (Public)
+     * HU-01 · CA-01.1, CA-01.2, T-17
      */
     public function login(Request $request): JsonResponse
     {
-        $validator = Validator::make($request->all(), [
-            'username' => 'required|string',
-            'password' => 'required|string',
-        ]);
-
-        if ($validator->fails()) {
-            return ApiResponse::error(
-                'VALIDATION_ERROR',
-                'Campos requeridos incompletos.',
-                collect($validator->errors())->map(fn($msgs, $field) => ['field' => $field, 'issue' => $msgs[0]])->values()->all(),
-                422
-            );
+        $adminUser = (string) config('app.admin_username', env('ADMIN_USERNAME', ''));
+        $adminPass = (string) config('app.admin_password', env('ADMIN_PASSWORD', ''));
+        if ($adminUser !== '' && $adminPass !== '') {
+            $this->provisionAdminService->ensureProvisioned($adminUser, $adminPass);
         }
 
-        $username = strtolower(trim($request->input('username')));
-        $user = User::where('username', $username)->first();
+        $username = (string) $request->input('username', '');
+        $password = (string) $request->input('password', '');
 
-        // CA-01.2: Con credenciales inválidas responde 401 con mensaje que no dice si falló usuario o clave
-        if (!$user || !password_verify($request->input('password'), $user->password_hash)) {
-            return ApiResponse::error(
-                'INVALID_CREDENTIALS',
-                'Credenciales de acceso inválidas.',
-                [],
-                401
-            );
-        }
-
-        $tokenData = $this->jwtService->generateToken($user);
+        $tokenData = $this->loginService->execute($username, $password);
 
         return response()->json($tokenData, 200);
     }
 
     /**
-     * GET /api/v1/health
+     * GET /api/v1/health and GET /health (Public)
      */
     public function health(): JsonResponse
     {
