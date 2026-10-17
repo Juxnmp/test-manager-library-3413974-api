@@ -1,51 +1,74 @@
-# test-manager-library-3413974-api
+# test-manager-library-3413974-api — Backend (PHP 8.3 / Laravel 11)
 
-> **Prueba técnica · Ficha ADSO 3413974**
-> Horario: de **9:15 a. m. a 3:00 p. m.** (15:00). Después, **feria de presentación** de cada proyecto.
+> **Prueba técnica · Ficha ADSO 3413974 — Manager Library**
 
-Este repositorio es el **backend** de *Manager Library*, en **PHP con Laravel**. **Empieza vacío a propósito**: se construye en el fork de cada aprendiz.
+Backend de **Manager Library** implementado en **PHP 8.3 con Laravel 11**, siguiendo **Desarrollo Guiado por Especificaciones (SDD)** y **Arquitectura Hexagonal (Puertos y Adaptadores)** conforme a [`constitution.md`](https://github.com/Juxnmp/test-manager-library-3413974-docs) y [`architecture.md`](https://github.com/Juxnmp/test-manager-library-3413974-docs).
 
-## Instrucciones
+---
 
-Cada aprendiz debe **crear el fork** de los seis repositorios del proyecto y **resolver el proyecto
-con el spec planteado**.
+## Arquitectura Hexagonal (Capas y Reglas de Dependencia)
 
-1. Hacer fork, a su cuenta de GitHub, de cada repositorio de la tabla del final.
-2. Leer el spec en [`test-manager-library-3413974-docs`](https://github.com/code-sena/test-manager-library-3413974-docs).
-   Se entrega en dos versiones: `spec-python/` y `spec-.net/`.
-3. Desarrollar en los forks.
+```text
+app/
+├── Domain/                          # Artículo I: Puro PHP, sin dependencias de framework ni ORM
+│   ├── Entities/                    # Agregados: Book, Loan, LoanItem, Member, User
+│   ├── ValueObjects/                # Objetos de valor: Isbn, Quantity, DateRange, DocumentNumber, Uuid
+│   └── Exceptions/                  # Errores de dominio mapeados a los 14 códigos de api-contract.md §2
+├── Application/                     # Artículo II: Solo depende de Domain; declara sus propios puertos
+│   ├── Ports/Outbound/              # Interfaces: BookRepository, LoanRepository, MemberRepository,
+│   │                                # UserRepository, CategoryRepository, ReportReader,
+│   │                                # Clock, PasswordHasher, TokenIssuer, CoverStorage
+│   └── Services/                    # Casos de uso: LoginService, CreateLibrarianService,
+│                                    # CreateBookService, SearchBooksService, MemberService,
+│                                    # LendBooksService, ReturnItemService, OverdueService,
+│                                    # MostBorrowedReportService
+├── Bootstrap/Composition/           # Artículo III: PortBindings (único punto de composición DI)
+├── Http/                            # Adaptador de entrada HTTP (Controladores, Middleware JWT, ApiResponse)
+├── Models/                          # Modelos de persistencia Eloquent sobre el esquema library.*
+└── Console/Commands/                # ProvisionAdminCommand (app:provision-admin)
+```
 
-## El reto se desarrolla con React y PHP (Laravel)
+---
 
-El spec está escrito para Python y para .NET, pero el reto **no** se hace en esos lenguajes:
+## Decisiones Técnicas Documentadas
 
-| Capa | Tecnología del reto |
+1. **Propiedad del esquema (`ADR-001`, `data-model.md` §3 y §10):**
+   - El esquema `library` en PostgreSQL 16 contiene exclusivamente las 6 tablas del modelo físico (`category`, `book`, `member`, `loan`, `loan_item`, `"user"`), sin valores `DEFAULT` ni columnas de auditoría (`created_at`/`updated_at`).
+   - La tabla de control `migrations` de Laravel se aloja en el esquema `public` (`DB_SCHEMA=public,library`) para que las consultas de verificación de `data-model.md` §10 devuelvan exactamente las 6 tablas del dominio.
+   - Las 5 categorías fijas (`Novela`, `Ciencia`, `Tecnología`, `Historia`, `Infantil`) se siembran en la migración inicial con sus UUID literales documentados en `data-model.md` §9.
+2. **Invariantes en el motor (`constitution.md` Art. VI y X):**
+   - Se imponen en PostgreSQL `ck_book_available_range` (`0 <= available_copies <= total_copies`), `ck_book_total_positive` (`total_copies >= 1`), `ck_user_role` (`role IN ('admin', 'librarian')`), el índice único parcial `ix_book_isbn_active` (`WHERE deleted_at IS NULL`) y las claves foráneas `RESTRICT` / `CASCADE`.
+3. **Valores congelados y estado calculado (`constitution.md` Art. VII y VIII, `ADR-004`):**
+   - `LoanItem` congela `book_title`, `isbn` y `category_name` en el instante del préstamo (`due_at = loaned_at + 14 días`).
+   - El estado del préstamo (`open`, `overdue`, `closed`) y los días de retraso (`days_late`) se calculan dinámicamente usando el puerto `Clock` en UTC y nunca se almacenan en base de datos.
+
+---
+
+## Variables de Entorno Principales (`.env`)
+
+Ver [`.env.example`](.env.example):
+
+| Variable | Descripción |
 |---|---|
-| Frontend | React |
-| Backend | PHP con Laravel |
+| `DB_CONNECTION=pgsql` | Motor PostgreSQL 16 |
+| `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD` | Conexión a PostgreSQL (`library`) |
+| `DB_SCHEMA=public,library` | Esquema `public` para `migrations` y `library` para las 6 tablas del dominio |
+| `JWT_SECRET` | Clave secreta para firma JWT HS256 (vigencia de 8 horas / 28800 s) |
+| `ADMIN_USERNAME`, `ADMIN_PASSWORD` | Credenciales para aprovisionar el usuario `admin` inicial |
+| `CORS_ORIGIN` / `FRONTEND_URL` | Origen permitido del frontend React (`http://localhost:5173`) |
+| `COVERS_DIR` | Directorio de almacenamiento de portadas opacas |
 
-Lo que el spec define sobre el negocio —historias, criterios de aceptación, reglas, contrato de la
-API, modelo de datos— se respeta. Lo que define sobre la tecnología se traduce a React y Laravel.
+---
 
-## La prueba no consiste en escribir el código
+## Ejecución Local y Pruebas
 
-El propósito principal es ver la **capacidad de desempeño con SDD** (*Spec-Driven Development*,
-desarrollo guiado por especificación): cómo se lee, se interpreta y se aplica una especificación
-para llevarla a un stack distinto. El código es el medio, no el fin.
+```bash
+# 1. Ejecutar migraciones en PostgreSQL 16
+php artisan migrate
 
-## Feria de presentación
+# 2. Aprovisionar administrador inicial desde variables de entorno
+php artisan app:provision-admin
 
-Al cerrar la prueba (3:00 p. m.) cada aprendiz **presenta su proyecto** al grupo: qué construyó del spec, qué dejó fuera y por qué,
-y una demostración corta de lo que funciona (la aplicación y el sitio público). Lo que se presenta es lo que quedó **subido a los forks
-antes de las 3:00 p. m.**: no se presenta nada que no esté en GitHub.
-
-## Los seis repositorios
-
-| Repositorio | Qué va ahí |
-|---|---|
-| [`test-manager-library-3413974-docs`](https://github.com/code-sena/test-manager-library-3413974-docs) | El spec: `spec-python/` y `spec-.net/` |
-| [`test-manager-library-3413974-api`](https://github.com/code-sena/test-manager-library-3413974-api) | Backend en PHP (Laravel) |
-| [`test-manager-library-3413974-app`](https://github.com/code-sena/test-manager-library-3413974-app) | Frontend en React |
-| [`test-manager-library-3413974-page`](https://github.com/code-sena/test-manager-library-3413974-page) | Sitio público estático de presentación |
-| [`test-manager-library-3413974-infra`](https://github.com/code-sena/test-manager-library-3413974-infra) | Contenedores, red, volúmenes y motor de base de datos vacío |
-| [`test-manager-library-3413974-tool`](https://github.com/code-sena/test-manager-library-3413974-tool) | Utilidades: sembrador de datos de demostración |
+# 3. Ejecutar suite de pruebas (Dominio, Aplicación con Fakes y Esquema/Health)
+./vendor/bin/phpunit
+```
